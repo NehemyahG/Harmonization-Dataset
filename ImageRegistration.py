@@ -1,9 +1,13 @@
 # Code for registration of all images
 import itk
-import ants
 import numpy as np
 from scipy.ndimage import zoom
 from utils import read_dicom
+
+try:
+    import ants
+except ImportError:
+    ants = None
 
 class ImageRegistrator:
     def __init__(self, registration_method, reference_image=None, params=None, print_logs=False):
@@ -12,19 +16,25 @@ class ImageRegistrator:
         self.reference_image = reference_image
         self.print_logs = print_logs
         if 'elastic' in self.registration_method:
-            # Define the defualt parameters of the elastix registration:
-            self.parameter_object = itk.ParameterObject.New()
-            self.default_parameter_map = self.parameter_object.GetDefaultParameterMap('rigid')
-            #self.default_parameter_map['MaximumNumberOfIterations'] = ['1000']
-            self.parameter_object.AddParameterMap(self.default_parameter_map)
-            # Overwrite the default parameters with the user-defined parameters
-            if params is not None:
-                for key in params:
-                    self.default_parameter_map[key] = params[key]
-            self.register_image = self.register_image_elastic
+            if hasattr(itk, 'ParameterObject') and hasattr(itk, 'ElastixRegistrationMethod'):
+                # Define the defualt parameters of the elastix registration:
+                self.parameter_object = itk.ParameterObject.New()
+                self.default_parameter_map = self.parameter_object.GetDefaultParameterMap('rigid')
+                #self.default_parameter_map['MaximumNumberOfIterations'] = ['1000']
+                self.parameter_object.AddParameterMap(self.default_parameter_map)
+                # Overwrite the default parameters with the user-defined parameters
+                if params is not None:
+                    for key in params:
+                        self.default_parameter_map[key] = params[key]
+                self.register_image = self.register_image_elastic
+            else:
+                print('Elastix is not available in this ITK build. Using the unregistered volume as a fallback.')
+                self.register_image = self.register_image_identity
 
         elif 'ants' in self.registration_method:
             self.register_image = self.register_image_ants
+        else:
+            self.register_image = self.register_image_identity
 
     def get_image(self, image):
         if isinstance(image, str):
@@ -83,8 +93,17 @@ class ImageRegistrator:
         image_registered = self.resample_image(itk.GetArrayFromImage(result_image), [reference_image.shape[i]/result_image.shape[i] for i in range(3)])
 
         return image_registered, reference_image
+
+    def register_image_identity(self, moving_image, reference_image=None, downsample_factor=4):
+        if reference_image is None:
+            reference_image = self.reference_image
+        moving_image = self.get_image(moving_image)
+        return moving_image, reference_image
     
     def register_image_ants(self, moving_image, reference_image=None, downsample_factor=4):
+
+        if ants is None:
+            raise ImportError('ants is required for ANTs registration but is not installed.')
 
         # Register the image using elastix registration
         if self.reference_image is None:

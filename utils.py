@@ -1,7 +1,5 @@
 import os
 import itk
-from ants import image_read, registration
-import ants
 import torch
 import pydicom
 import numpy as np
@@ -12,10 +10,24 @@ from scipy.ndimage import zoom
 import nibabel as nib
 import dcmstack
 
+try:
+    from ants import image_read, registration
+    import ants
+except ImportError:
+    ants = None
+    image_read = None
+    registration = None
+
 level_window_torch = lambda x, level, window: torch.clamp(x,  level - window / 2, level + window/2)
 #level_window = lambda x, level, window: np.clip((x - level + window / 2) / window, 0, 1)
 level_window = lambda x, level, window: np.clip(x, level-window/2, level+window/2)
 #level, window = 0, 1000
+
+
+def _resolve_device(device=None):
+    if device is not None:
+        return device
+    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def flip_volume(volume, axis=0):
     volume = np.swapaxes(volume, 0, axis)
@@ -45,7 +57,7 @@ def dicom_to_nifti(dicom_dataset):
     image_nifti = image_stack.to_nifti()
     return image_nifti
 
-def read_dicom(dicom_dir, numpy_format=False, crop_region=[40,280,120,395,64,445], device='cuda', slice_thinknesses=None):
+def read_dicom(dicom_dir, numpy_format=False, crop_region=[40,280,120,395,64,445], device=None, slice_thinknesses=None, max_files=None, quick=False):
     # List to hold the image arrays
     slices = []
     filenames = sorted(glob(os.path.join(dicom_dir, '*')))
@@ -57,14 +69,22 @@ def read_dicom(dicom_dir, numpy_format=False, crop_region=[40,280,120,395,64,445
             ds = pydicom.dcmread(filepath)
             # Extract the pixel array and add to the list
             slices.append(ds)
+            if max_files is not None and len(slices) >= max_files:
+                break
    
     # Sort slices by Slice Location
     try:
         dicom_dataset = sorted(slices, key=lambda ds: -ds.InstanceNumber)
-        image_nifti = dicom_to_nifti(dicom_dataset)
-    except:
+    except Exception:
         dicom_dataset = sorted(slices, key=lambda ds: ds.SliceLocation)
-        image_nifti = dicom_to_nifti(dicom_dataset)
+
+    if max_files is None:
+        try:
+            image_nifti = dicom_to_nifti(dicom_dataset)
+        except Exception:
+            image_nifti = None
+    else:
+        image_nifti = None
 
     # Sort slices by Image Position Patient (z-axis position)
     # slices.sort(key=lambda ds: ds.ImagePositionPatient[2])
@@ -83,24 +103,25 @@ def read_dicom(dicom_dir, numpy_format=False, crop_region=[40,280,120,395,64,445
     #     scanners_list = slice_thinknesses.keys()
     #     scanner_volume = [item for item in scanners_list if item in dicom_dir][0]
     # if slice_thinknesses[scanner_volume] != 2.0:
-    slice_thinkness = float(ds.SliceThickness)
-    if slice_thinkness != 2.0:
-        zoom_factors = (slice_thinkness / 2.0, 1, 1)
-        # Resample the image
-        volume = zoom(volume, zoom_factors, order=1)
-        if volume.shape[0] > 343:
-            slices_2 = volume.shape[0]
-            shift = (slices_2 - 343) // 2
-            volume = volume[shift:shift+343, ...]
-    if volume.shape[0] != 343:
-        # Calculate the zoom factors for each dimension
-        zoom_factors = (343 / volume.shape[0], 1, 1)
-        # Resample the image
-        volume = zoom(volume, zoom_factors, order=1)
-        
-    # Crop the region of Phantom
-    if crop_region:
-        volume = volume[crop_region[0]:crop_region[1], crop_region[2]:crop_region[3], crop_region[4]:crop_region[5]]
+    if not quick:
+        slice_thinkness = float(ds.SliceThickness)
+        if slice_thinkness != 2.0:
+            zoom_factors = (slice_thinkness / 2.0, 1, 1)
+            # Resample the image
+            volume = zoom(volume, zoom_factors, order=1)
+            if volume.shape[0] > 343:
+                slices_2 = volume.shape[0]
+                shift = (slices_2 - 343) // 2
+                volume = volume[shift:shift+343, ...]
+        if volume.shape[0] != 343:
+            # Calculate the zoom factors for each dimension
+            zoom_factors = (343 / volume.shape[0], 1, 1)
+            # Resample the image
+            volume = zoom(volume, zoom_factors, order=1)
+            
+        # Crop the region of Phantom
+        if crop_region:
+            volume = volume[crop_region[0]:crop_region[1], crop_region[2]:crop_region[3], crop_region[4]:crop_region[5]]
     # idx=-76;plt.imshow(np.clip(volume, -500, 1000)[idx,...], 'gray');plt.savefig('fig.png');
     # Create a 3D numpy array from the sorted slices
     # volume = np.stack([ds.pixel_array for ds in slices], axis=0)
@@ -115,6 +136,9 @@ def read_dicom(dicom_dir, numpy_format=False, crop_region=[40,280,120,395,64,445
     #     volume = np.flip(volume, axis=0)
     volume_flipped = flip_volume(volume)
     volume = level_window(volume, 500, 3000)
+    device = _resolve_device(device)
+    if image_nifti is None:
+        image_nifti = nib.Nifti1Image(volume.astype(np.float32), np.eye(4))
     if numpy_format:
         return [torch.tensor(volume.transpose(1, 2, 0)).to(device).float().unsqueeze(0).unsqueeze(0), volume, 
             torch.tensor(volume_flipped.transpose(1, 2, 0)).to(device).float().unsqueeze(0).unsqueeze(0), volume_flipped, image_nifti]
@@ -123,7 +147,8 @@ def read_dicom(dicom_dir, numpy_format=False, crop_region=[40,280,120,395,64,445
         # print(volume.shape)
         return torch.tensor(volume.transpose(1, 2, 0)).to(device).float().unsqueeze(0).unsqueeze(0)
 
-def read_nifti(file_path, device='cuda'):
+def read_nifti(file_path, device=None):
+    device = _resolve_device(device)
     image = nib.load(file_path).get_fdata()
     image = image.transpose(1, 0, 2)
     image = flip_volume(image, axis=0)
@@ -160,11 +185,13 @@ def elstic_registration(fixed_image, moving_image, parameter_object):
     return fixed_image_down, result_image, result_transform_parameters
 
 def elastic_results_to_tensor(fixed_image, moving_image):
+    device = _resolve_device()
     fixed_image = itk.GetArrayFromImage(fixed_image).transpose([1, 2, 0])
     moving_image = itk.GetArrayFromImage(moving_image).transpose([1, 2, 0])
     return torch.tensor(fixed_image).to(device).float().unsqueeze(0).unsqueeze(0), torch.tensor(moving_image).to(device).float().unsqueeze(0).unsqueeze(0)
 
-def array_to_tensor(nparray, device='cuda'):
+def array_to_tensor(nparray, device=None):
+    device = _resolve_device(device)
     return torch.tensor(nparray).to(device).float().unsqueeze(0).unsqueeze(0)
 
 def find_shifts(img, gt, axis=-1, downsample=4):
