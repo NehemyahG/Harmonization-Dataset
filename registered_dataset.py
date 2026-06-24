@@ -107,20 +107,8 @@ def _process_single_scan(scan_folder, folder, reference_volumes, output_dir, max
 
         if smoke_test:
             registered_nifti = nib.Nifti1Image(volumes[1].astype(float), nifti_image.affine)
-            temp_file = final_file.replace(".nii.gz", ".partial.nii.gz")
-            # write to a temporary file on the same filesystem, then atomically replace
-            registered_nifti.to_filename(temp_file)
-            try:
-                os.replace(temp_file, final_file)
-                # create done marker
-                with open(done_marker, 'w', encoding='utf-8'):
-                    pass
-            finally:
-                if os.path.exists(temp_file):
-                    try:
-                        os.remove(temp_file)
-                    except Exception:
-                        pass
+            registered_nifti.to_filename('result.nii.gz')
+            shutil.move('result.nii.gz', final_file)
             return ('ok', scan_folder, None)
 
         ssim = metrics.SSIMMetric(spatial_dims=3, data_range=ssim_data_range)
@@ -152,29 +140,10 @@ def _process_single_scan(scan_folder, folder, reference_volumes, output_dir, max
         registered_image_nifti = flip_volume(registered_image_nifti, axis=1)
 
         registered_nifti = nib.Nifti1Image(registered_image_nifti.astype(float), nifti_image.affine)
-        temp_file = final_file.replace(".nii.gz", ".partial.nii.gz")
-        registered_nifti.to_filename(temp_file)
-        try:
-            os.replace(temp_file, final_file)
-            # write done marker for robust detection
-            with open(done_marker, 'w', encoding='utf-8'):
-                pass
-        finally:
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except Exception:
-                    pass
+        registered_nifti.to_filename('result.nii.gz')
+        shutil.move('result.nii.gz', final_file)
         return ('ok', scan_folder, None)
     except Exception as exc:
-        # attempt to remove any partial file left behind
-        try:
-            final_file = os.path.join(output_dir, _scan_output_name(scan_folder, folder))
-            temp_file = final_file.replace(".nii.gz", ".partial.nii.gz")
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-        except Exception:
-            pass
         return ('failed', scan_folder, str(exc))
 
 
